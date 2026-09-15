@@ -1,0 +1,78 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Databases & local stores
+*.sqlite3
+db.sqlite3
+db.sqlite3-journal
+
+# Logs
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.tox/
+.nox/
+coverage.xml
+*.cover
+tmp/
+pytest_temp/
+
+# Django static and media
+staticfiles/
+media/
+
+# IDE & Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# Large archives and temporary binary bundles
+*.zip
+
+# Operating System
+.DS_Store
+Thumbs.db
+desktop.ini
+

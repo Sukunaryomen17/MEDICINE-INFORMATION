@@ -1,0 +1,230 @@
+body {
+  margin: 0;
+  font-family: 'DM Sans', Arial, Helvetica, sans-serif;
+  background: #0b0c0e;
+  color: #e8eaf0;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.sidebar {
+  width: 260px;
+  background: #131518;
+  border-right: 1px solid #1e2126;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  position: relative;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar.collapsed {
+  width: 80px;
+  padding: 20px 10px;
+}
+
+.logo-wrapper {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  margin: 0 0 30px 0;
+}
+
+.logo {
+  width: 120px;
+  height: auto;
+  display: block;
+  object-fit: contain;
+  transition: transform 0.3s ease, width 0.3s ease;
+  filter: drop-shadow(0 4px 12px rgba(47, 128, 237, 0.3));
+}
+
+.sidebar.collapsed .logo {
+  width: 40px;
+}
+
+.logo:hover {
+  transform: translateY(-2px) scale(1.05);
+  filter: drop-shadow(0 8px 20px rgba(47, 128, 237, 0.5));
+}
+
+.toggle-btn {
+  position: absolute;
+  right: -14px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  background: #1e2126;
+  border: 1px solid #2a2f38;
+  color: #6b7280;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.sidebar:hover .toggle-btn {
+  opacity: 1;
+}
+
+.toggle-btn:hover {
+  background: #2f80ed;
+  color: #fff;
+  border-color: #2f80ed;
+}
+
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 8px 0;
+  padding: 12px;
+  border-radius: 12px;
+  color: #6b7280;
+  text-decoration: none;
+  font-size: 15px;
+  font-weight: 500;
+  transition: background 0.2s, color 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.nav a:hover {
+  background: #1e2126;
+  color: #e8eaf0;
+}
+
+.nav a i {
+  width: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.sidebar.collapsed .label {
+  display: none;
+}
+
+.profile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  transition: 0.2s;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.profile:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: #2a2f38;
+}
+
+.profile-icon {
+  width: 36px;
+  height: 36px;
+  background: linear-gradient(135deg, #2f80ed, #00d4aa);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
+  background: radial-gradient(circle at 50% 0%, #1a2332, #0b0c0e 60%);
+}
+
+h1 {
+  font-size: 36px;
+  margin-bottom: 40px;
+  font-weight: 600;
+  letter-spacing: -1px;
+}
+
+.search-box {
+  width: 100%;
+  max-width: 640px;
+  background: rgba(19, 21, 24, 0.8);
+  backdrop-filter: blur(10px);
+  padding: 10px 10px 10px 20px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid #2a2f38;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+.search-box:focus-within {
+  border-color: #2f80ed;
+  box-shadow: 0 10px 30px rgba(47, 128, 237, 0.15);
+}
+
+.search-box input[type="text"] {
+  flex: 1;
+  background: none;
+  border: none;
+  outline: none;
+  color: #fff;
+  font-size: 16px;
+}
+
+.search-box input[type="text"]::placeholder {
+  color: #6b7280;
+}
+
+.plus-btn {
+  color: #6b7280;
+  cursor: pointer;
+  transition: color 0.2s;
+  font-size: 18px;
+}
+
+.plus-btn:hover {
+  color: #2f80ed;
+}
+
+.icon-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: #2f80ed;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.2s, background 0.2s;
+  flex-shrink: 0;
+}
+
+.icon-btn:hover {
+  background: #2563eb;
+  transform: scale(1.05);
+}
+
+input[type="file"] {
+  display: none;
+}

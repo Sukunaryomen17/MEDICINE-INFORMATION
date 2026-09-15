@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: medidata-ocr
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: USE_MOCK_MODE
+        value: false
+      - key: PORT
+        value: 8000
+

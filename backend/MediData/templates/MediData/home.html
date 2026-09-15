@@ -1,0 +1,322 @@
+{% extends 'MediData/base.html' %}
+{% load static %}
+
+{% block title %}MediData — AI Medical Bill Intelligence & Medicine Explorer{% endblock %}
+
+{% block content %}
+
+  <!-- ─── 1. HERO SECTION ─── -->
+  <section class="hero-section">
+    <div class="container">
+      <div class="hero-pill">
+        <i class="fa-solid fa-sparkles"></i> AI-Powered Medical Bill Intelligence
+      </div>
+      
+      <h1 class="hero-title">
+        Understand your medical bills in <span class="gradient-text">seconds.</span>
+      </h1>
+      
+      <p class="hero-subtitle">
+        Instant itemized breakdown, clinical composition, side effects safety, and real-time market price comparison for transparent, intelligent healthcare.
+      </p>
+
+      <div class="hero-actions">
+        <a href="#upload-section" class="btn btn-primary btn-lg">
+          <i class="fa-solid fa-file-invoice"></i> Analyze a Bill
+        </a>
+        <a href="#medicine-explorer" class="btn btn-outline btn-lg">
+          <i class="fa-solid fa-magnifying-glass"></i> Explore 11,800+ Medicines
+        </a>
+      </div>
+
+      <div class="hero-features-bar">
+        <div class="hero-feature-item">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <div>
+            <strong>Automated OCR Extraction</strong>
+            <div style="color:var(--text-dim); font-size:12px;">Parses complex hospital invoices</div>
+          </div>
+        </div>
+        <div class="hero-feature-item">
+          <i class="fa-solid fa-dna"></i>
+          <div>
+            <strong>Clinical Composition</strong>
+            <div style="color:var(--text-dim); font-size:12px;">Active salts, uses & side-effects</div>
+          </div>
+        </div>
+        <div class="hero-feature-item">
+          <i class="fa-solid fa-tags"></i>
+          <div>
+            <strong>Market Price Check</strong>
+            <div style="color:var(--text-dim); font-size:12px;">Live benchmark against 1mg</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── 2. BILL ANALYSIS & UPLOAD SECTION ─── -->
+  <section class="section-upload" id="upload-section">
+    <div class="container">
+      <div class="upload-card-wrapper">
+        
+        <div style="text-align:center; margin-bottom:24px;">
+          <h2 style="font-size:22px; font-weight:800; color:var(--text-main); letter-spacing:-0.5px;">
+            Upload Medical Bill / Invoice
+          </h2>
+          <p style="color:var(--text-muted); font-size:14px; margin-top:4px;">
+            Drop your hospital invoice, pharmacy receipt, or prescription scan below.
+          </p>
+        </div>
+
+        {% if not is_authenticated %}
+          <div style="background: rgba(37, 99, 235, 0.1); border: 1px solid rgba(37, 99, 235, 0.25); border-radius: var(--radius-md); padding: 12px 18px; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+            <div style="display:flex; align-items:center; gap:10px; font-size:13px; color: #bfdbfe;">
+              <i class="fa-solid fa-lock"></i>
+              <span>Account recommended to save analysis history and access full features.</span>
+            </div>
+            <div style="display:flex; gap:8px;">
+              <a href="{% url 'login' %}" class="btn btn-outline btn-sm">Sign In</a>
+              <a href="{% url 'register' %}" class="btn btn-primary btn-sm">Register</a>
+            </div>
+          </div>
+        {% endif %}
+
+        <!-- Interactive Drag & Drop Box -->
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="billFileInput" accept=".pdf,.png,.jpg,.jpeg,.webp" style="display:none;" />
+          <div class="dropzone-icon">
+            <i class="fa-solid fa-cloud-arrow-up"></i>
+          </div>
+          <div class="dropzone-title">Drop your medical document here, or browse</div>
+          <div class="dropzone-subtitle">Supports clear scans, photos, or digital hospital invoices</div>
+          <div class="supported-formats">
+            <span class="format-tag">PDF</span>
+            <span class="format-tag">PNG</span>
+            <span class="format-tag">JPG</span>
+            <span class="format-tag">WEBP</span>
+            <span class="format-tag" style="color:var(--teal);">Max 15 MB</span>
+          </div>
+        </div>
+
+        <!-- File Selected Details Card -->
+        <div class="file-selected-card" id="fileSelectedCard">
+          <div class="file-info-group">
+            <div class="file-icon-box">
+              <i class="fa-regular fa-file-lines"></i>
+            </div>
+            <div class="file-details">
+              <div class="file-name" id="selectedFileName">filename.pdf</div>
+              <div class="file-size" id="selectedFileSize">0 KB</div>
+            </div>
+          </div>
+          <div class="file-actions">
+            <button class="btn-remove-file" id="btnRemoveFile" title="Remove file">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+            <button class="btn btn-teal" id="btnStartAnalysis">
+              <i class="fa-solid fa-bolt"></i> Analyze Document
+            </button>
+          </div>
+        </div>
+
+        <!-- Honest Multi-Step Progress Box -->
+        <div class="processing-card" id="processingCard">
+          <div class="processing-header">
+            <div class="spinner"></div>
+            <div class="processing-title">Analyzing document with MediData Intelligence Engine...</div>
+          </div>
+          <div class="steps-list">
+            <div class="step-item" id="procStep1">
+              <div class="step-bullet"><i class="fa-solid fa-circle" style="font-size:6px"></i></div>
+              <span>Uploading document to secure processing pipeline</span>
+            </div>
+            <div class="step-item" id="procStep2">
+              <div class="step-bullet"><i class="fa-solid fa-circle" style="font-size:6px"></i></div>
+              <span>Extracting line items and table structures via OCR</span>
+            </div>
+            <div class="step-item" id="procStep3">
+              <div class="step-bullet"><i class="fa-solid fa-circle" style="font-size:6px"></i></div>
+              <span>Cross-referencing clinical database and 1mg market prices</span>
+            </div>
+            <div class="step-item" id="procStep4">
+              <div class="step-bullet"><i class="fa-solid fa-circle" style="font-size:6px"></i></div>
+              <span>Compiling transparent financial & clinical analytics</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── 3. RESULTS DASHBOARD SECTION ─── -->
+  <section class="section-results" id="sectionResults">
+    <div class="container">
+      
+      <!-- Results Header -->
+      <div class="results-header-bar">
+        <div class="results-doc-info">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:11px; padding:3px 8px; border-radius:var(--radius-full); background:var(--success-bg); color:var(--success); font-weight:700;">
+              <i class="fa-solid fa-circle-check"></i> ANALYSIS COMPLETE
+            </span>
+          </div>
+          <h3 id="resultsDocName" style="margin-top:6px;">Analyzed Medical Bill</h3>
+          <div class="results-doc-meta">
+            <span><i class="fa-regular fa-calendar" style="margin-right:4px;"></i> Just now</span>
+            <span><i class="fa-solid fa-shield-halved" style="margin-right:4px;"></i> Verified Extraction</span>
+          </div>
+        </div>
+        <div>
+          <a href="#upload-section" class="btn btn-outline btn-sm" onclick="document.getElementById('billFileInput').click()">
+            <i class="fa-solid fa-upload"></i> Analyze Another Bill
+          </a>
+        </div>
+      </div>
+
+      <!-- Metrics Grid -->
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-card-label">
+            <span>Total Bill Amount</span>
+            <i class="fa-solid fa-receipt" style="color:var(--primary-light);"></i>
+          </div>
+          <div class="metric-card-value" id="metricGrandTotal">₹0.00</div>
+          <div class="metric-card-subtitle">Grand total invoiced</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-card-label">
+            <span>Detected Items</span>
+            <i class="fa-solid fa-layer-group" style="color:var(--cyan);"></i>
+          </div>
+          <div class="metric-card-value" id="metricTotalItems">0 Items</div>
+          <div class="metric-card-subtitle">Hospital & pharmacy charges</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-card-label">
+            <span>Medicines & Drugs</span>
+            <i class="fa-solid fa-pills" style="color:var(--teal);"></i>
+          </div>
+          <div class="metric-card-value metric-highlight-teal" id="metricMedicinesCount">0 Rx</div>
+          <div class="metric-card-subtitle">Clinical compound matched</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-card-label">
+            <span>Market Price Check</span>
+            <i class="fa-solid fa-chart-line" style="color:var(--success);"></i>
+          </div>
+          <div class="metric-card-value" id="metricSavingsAmount" style="font-size:20px;">Benchmark checked</div>
+          <div class="metric-card-subtitle">Compared with 1mg market rates</div>
+        </div>
+      </div>
+
+      <!-- Category Filter Tabs -->
+      <div class="filter-tabs-bar" id="filterTabsContainer">
+        <!-- Injected via JavaScript -->
+      </div>
+
+      <!-- Items Grid -->
+      <div class="items-grid" id="itemsContainer">
+        <!-- Injected via JavaScript -->
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ─── 4. MEDICINE LIVE SEARCH EXPLORER ─── -->
+  <section class="section-medicines" id="medicine-explorer">
+    <div class="container">
+      <div class="section-header">
+        <div class="section-tag"><i class="fa-solid fa-capsules"></i> Drug & Compound Database</div>
+        <h2 class="section-title">Explore 11,800+ Verified Medicines</h2>
+        <p class="section-subtitle">
+          Search active pharmaceutical ingredients, clinical indications, known side effects, manufacturers, and real-time market prices.
+        </p>
+      </div>
+
+      <!-- Search Input -->
+      <div class="search-container">
+        <div class="search-input-wrapper">
+          <i class="fa-solid fa-magnifying-glass search-icon"></i>
+          <input 
+            type="text" 
+            class="search-input" 
+            id="medicineSearchInput" 
+            placeholder="Search by brand name, salt composition, or medical use (e.g. Paracetamol, Augmentin, Allegra)..." 
+            autocomplete="off"
+          />
+        </div>
+      </div>
+
+      <!-- Quick Chips -->
+      <div class="quick-search-chips">
+        <span style="font-size:12px; color:var(--text-dim); margin-right:4px;">Popular:</span>
+        <button class="chip-btn" onclick="setQuickSearch('Augmentin')">Augmentin 625</button>
+        <button class="chip-btn" onclick="setQuickSearch('Dolo 650')">Dolo 650</button>
+        <button class="chip-btn" onclick="setQuickSearch('Azithral')">Azithral 500</button>
+        <button class="chip-btn" onclick="setQuickSearch('Allegra')">Allegra 120</button>
+        <button class="chip-btn" onclick="setQuickSearch('Aciloc')">Aciloc 150</button>
+        <button class="chip-btn" onclick="setQuickSearch('Ascoril')">Ascoril LS</button>
+        <button class="chip-btn" onclick="setQuickSearch('Paracetamol')">Paracetamol</button>
+      </div>
+
+      <!-- Search Results Grid -->
+      <div class="med-search-results-grid" id="medSearchResultsGrid">
+        <!-- Injected via JavaScript -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ─── 5. HOW IT WORKS SECTION ─── -->
+  <section class="section-how" id="how-it-works">
+    <div class="container">
+      <div class="section-header">
+        <div class="section-tag"><i class="fa-solid fa-microchip"></i> System Architecture</div>
+        <h2 class="section-title">How MediData Processes Your Bills</h2>
+        <p class="section-subtitle">
+          An end-to-end intelligent pipeline designed to bring clarity and fair pricing to healthcare billing.
+        </p>
+      </div>
+
+      <div class="steps-grid">
+        <div class="step-card">
+          <div class="step-number">01</div>
+          <div class="step-icon">
+            <i class="fa-solid fa-file-arrow-up"></i>
+          </div>
+          <h3 class="step-title">Document Ingestion & OCR</h3>
+          <p class="step-desc">
+            Your uploaded bill or prescription scan is preprocessed, normalized, and converted into high-fidelity structured text and tabular items.
+          </p>
+        </div>
+
+        <div class="step-card">
+          <div class="step-number">02</div>
+          <div class="step-icon">
+            <i class="fa-solid fa-network-wired"></i>
+          </div>
+          <h3 class="step-title">Classification & Entity Extraction</h3>
+          <p class="step-desc">
+            MediData automatically segments charges into Medicines, Lab Tests, Surgical Devices, and Hospital Room Services.
+          </p>
+        </div>
+
+        <div class="step-card">
+          <div class="step-number">03</div>
+          <div class="step-icon">
+            <i class="fa-solid fa-chart-pie"></i>
+          </div>
+          <h3 class="step-title">Clinical & Price Intelligence</h3>
+          <p class="step-desc">
+            Medicines are fuzzy-matched against 11,800+ clinical formulations for safety information and cross-referenced with live 1mg prices for price transparency.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+{% endblock %}

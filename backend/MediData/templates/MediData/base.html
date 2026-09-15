@@ -1,0 +1,136 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}MediData — AI Medical Bill Intelligence{% endblock %}</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- FontAwesome 6 Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- Application Design System CSS -->
+  <link rel="stylesheet" href="{% static 'MediData/css/app.css' %}">
+  {% block extra_css %}{% endblock %}
+</head>
+<body>
+
+  <!-- Sticky Top Navigation -->
+  <header class="navbar">
+    <div class="container">
+      <a href="{% url 'home' %}" class="nav-brand">
+        <div class="brand-icon-box">
+          <i class="fa-solid fa-heart-pulse"></i>
+        </div>
+        <span>MediData</span>
+      </a>
+
+      <!-- Desktop Nav Links -->
+      <nav>
+        <ul class="nav-links">
+          <li><a href="{% url 'home' %}" class="nav-link {% if request.resolver_match.url_name == 'home' %}active{% endif %}">Home</a></li>
+          <li><a href="{% url 'home' %}#upload-section" class="nav-link">Analyze Bill</a></li>
+          <li><a href="{% url 'home' %}#medicine-explorer" class="nav-link">Medicine Explorer</a></li>
+          <li><a href="{% url 'home' %}#how-it-works" class="nav-link">How It Works</a></li>
+        </ul>
+      </nav>
+
+      <!-- Auth Controls -->
+      <div class="nav-auth">
+        {% if user.is_authenticated %}
+          <div class="user-badge" title="Logged in as {{ user.username }}">
+            <div class="user-avatar-sm">
+              {{ user.username|first|upper }}
+            </div>
+            <span>{{ user.first_name|default:user.username }}</span>
+          </div>
+          <form action="{% url 'logout' %}" method="post" style="margin:0; display:inline;">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-ghost btn-sm" title="Log Out">
+              <i class="fa-solid fa-arrow-right-from-bracket"></i>
+            </button>
+          </form>
+        {% else %}
+          <a href="{% url 'login' %}" class="btn btn-ghost btn-sm">Sign In</a>
+          <a href="{% url 'register' %}" class="btn btn-primary btn-sm">Get Started</a>
+        {% endif %}
+
+        <button class="mobile-toggle" id="mobileToggle" aria-label="Toggle navigation menu">
+          <i class="fa-solid fa-bars"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Mobile Drawer -->
+  <div class="mobile-nav-drawer" id="mobileNavDrawer">
+    <a href="{% url 'home' %}" class="nav-link">Home</a>
+    <a href="{% url 'home' %}#upload-section" class="nav-link">Analyze Bill</a>
+    <a href="{% url 'home' %}#medicine-explorer" class="nav-link">Medicine Explorer</a>
+    <a href="{% url 'home' %}#how-it-works" class="nav-link">How It Works</a>
+    <hr style="border-color: var(--border-subtle);">
+    {% if user.is_authenticated %}
+      <div style="display:flex; justify-content:space-between; align-items:center; padding: 6px 12px;">
+        <span style="font-size:13px; color:var(--text-muted);">Signed in as <strong>{{ user.username }}</strong></span>
+        <form action="{% url 'logout' %}" method="post" style="margin:0;">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger btn-sm">Logout</button>
+        </form>
+      </div>
+    {% else %}
+      <div style="display:flex; gap:10px;">
+        <a href="{% url 'login' %}" class="btn btn-outline btn-sm" style="flex:1;">Sign In</a>
+        <a href="{% url 'register' %}" class="btn btn-primary btn-sm" style="flex:1;">Get Started</a>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Main Content Body -->
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+
+  <!-- Medicine Detail Modal -->
+  <div class="modal-overlay" id="medicineModal" role="dialog" aria-modal="true">
+    <div class="modal-dialog">
+      <button class="modal-close-btn" id="modalCloseBtn" aria-label="Close dialog">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+      <div id="modalMedContent">
+        <!-- Injected via JavaScript -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Area -->
+  <div class="toast-container" id="toastContainer" aria-live="polite"></div>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div style="display:flex; align-items:center; gap:10px; font-weight:700; color:var(--text-main); font-size:16px;">
+        <div class="brand-icon-box" style="width:28px; height:28px; font-size:13px;">
+          <i class="fa-solid fa-heart-pulse"></i>
+        </div>
+        <span>MediData</span>
+      </div>
+      <p class="disclaimer-text">
+        MediData provides automated medical invoice data extraction and pharmaceutical market comparisons for transparency and informational guidance. MediData does not offer medical advice, clinical diagnoses, or prescribe treatment.
+      </p>
+      <div style="color:var(--text-dim); font-size:12px;">
+        © 2026 MediData. All rights reserved.
+      </div>
+    </div>
+  </footer>
+
+  <!-- Application Engine JS -->
+  <script src="{% static 'MediData/js/app.js' %}"></script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>
+

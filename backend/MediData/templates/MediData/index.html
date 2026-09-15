@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Medi-Data</title>
+
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.1/css/all.min.css" />
+</head>
+
+<body>
+
+  <div class="sidebar" id="sidebar">
+
+    
+
+    <div>
+      <div class="logo-wrapper">
+        <img src="./MediData.png" class="logo" />
+        <button class="toggle-btn" onclick="toggleSidebar()">
+          <i class="fa-solid fa-chevron-left" id="toggleIcon"></i>
+        </button>
+      </div>
+
+      <div class="nav">
+        <a href="#"><i class="fa-regular fa-pen-to-square"></i> <span class="label">New Chat</span></a>
+        <a href="#"><i class="fa-solid fa-magnifying-glass"></i> <span class="label">Search Prescriptions</span></a>
+        <a href="#"><i class="fa-solid fa-gear"></i> <span class="label">Settings</span></a>
+      </div>
+    </div>
+
+    <div class="profile">
+      <div class="profile-icon">M</div>
+      <span class="label">User</span>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <h1>What can I do for you?</h1>
+
+    <div class="search-box">
+      
+      <label for="fileUpload" class="plus-btn">
+        <i class="fa-solid fa-plus"></i>
+      </label>
+      <input type="file" id="fileUpload" />
+
+      <input type="text" placeholder="Upload your prescription..." />
+
+      <div class="icon-btn">
+        <i class="fa-solid fa-arrow-right"></i>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    function toggleSidebar() {
+      const sidebar = document.getElementById("sidebar");
+      const icon = document.getElementById("toggleIcon");
+
+      sidebar.classList.toggle("collapsed");
+
+      if (sidebar.classList.contains("collapsed")) {
+        icon.classList.remove("fa-chevron-left");
+        icon.classList.add("fa-chevron-right");
+      } else {
+        icon.classList.remove("fa-chevron-right");
+        icon.classList.add("fa-chevron-left");
+      }
+    }
+
+    document.getElementById("fileUpload").addEventListener("change", function() {
+      if (this.files.length > 0) {
+        alert("Uploaded: " + this.files[0].name);
+      }
+    });
+  </script>
+
+</body>
+</html>
