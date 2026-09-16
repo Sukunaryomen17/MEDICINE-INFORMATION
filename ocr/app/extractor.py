@@ -1,5 +1,5 @@
 """Medical-bill extraction pipeline: PDF/image -> OCR -> Gemini -> structured JSON."""
-import io, json, logging, os, re, time
+import io, json, logging, os, re, sys, time
 from pathlib import Path
 from typing import List, Optional, Tuple
 from dotenv import load_dotenv
@@ -12,26 +12,24 @@ logger = logging.getLogger(__name__)
 try:
     from pdf2image import convert_from_path
     PDF2IMAGE_AVAILABLE = True
-except ImportError:
+except ImportError as error:
     PDF2IMAGE_AVAILABLE = False
-    logger.warning("pdf2image is unavailable; PDF rendering is disabled")
+    logger.warning("pdf2image import failed (%s); PDF rendering is disabled", error)
 try:
-    import pytesseract
-    from PIL import Image, ImageEnhance, ImageFilter
-    tesseract_path = os.getenv("TESSERACT_CMD")
-    if tesseract_path:
-        pytesseract.pytesseract.tesseract_cmd = tesseract_path
-    OCR_AVAILABLE = True
+    from PIL import Image
+    PIL_AVAILABLE = True
 except ImportError:
-    OCR_AVAILABLE = False
-    logger.warning("pytesseract or Pillow is unavailable; local OCR hints are disabled")
+    PIL_AVAILABLE = False
+    logger.warning("Pillow is unavailable; image input is disabled")
+
+from app.ocr_engines import OCR_ENGINE, OCR_MAX_CHARS, autorotate_page, ocr_page
 try:
     from google import genai
     from google.genai import types
     GEMINI_AVAILABLE = True
-except ImportError:
+except ImportError as error:
     GEMINI_AVAILABLE = False
-    logger.warning("google-genai is unavailable; Gemini extraction is disabled")
+    logger.warning("google-genai import failed (%s); Gemini extraction is disabled", error)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
@@ -42,6 +40,13 @@ PDF_DPI = max(72, int(os.getenv("PDF_DPI", "200")))
 POPPLER_PATH = os.getenv("POPPLER_PATH") or None
 USE_MOCK_MODE = os.getenv("USE_MOCK_MODE", "false").lower() == "true"
 logger.info("Gemini API key: %s", "loaded" if GOOGLE_API_KEY else "not loaded")
+logger.info("OCR engine: %s (hint capped at %d characters)", OCR_ENGINE, OCR_MAX_CHARS)
+logger.info("interpreter: %s", sys.executable)
+logger.info(
+    "optional dependencies: pdf2image=%s gemini=%s",
+    "ok" if PDF2IMAGE_AVAILABLE else "MISSING",
+    "ok" if GEMINI_AVAILABLE else "MISSING",
+)
 
 SYSTEM_PROMPT = """You are an expert medical billing analyst. Extract every individual bill line item from each supplied page. Return a JSON ARRAY containing exactly one object per page, in the same order: [{"page_no":"1","page_type":"Bill Summary | Bill Detail | Pharmacy Bill | Lab Bill | Other","bill_items":[{"item_name":"description","item_amount":0.0,"item_rate":null,"item_quantity":null}],"fraud_flags":[]}]. Do not include subtotals or grand totals as line items. Summary pages with only category totals must have an empty bill_items list. Amounts must be numeric, and output must be valid JSON only."""
 
@@ -62,19 +67,6 @@ def _encode_image(img) -> bytes:
     buffer = io.BytesIO()
     img.convert("RGB").save(buffer, "JPEG", quality=85, optimize=True)
     return buffer.getvalue()
-
-def _enhance_image(img):
-    img = img.convert("L")
-    img = ImageEnhance.Contrast(img).enhance(2.0)
-    img = ImageEnhance.Sharpness(img).enhance(2.0)
-    return img.filter(ImageFilter.MedianFilter(size=3))
-
-def _ocr_page(img) -> str:
-    if not OCR_AVAILABLE: return ""
-    try: return pytesseract.image_to_string(_enhance_image(img.copy()), config="--psm 6").strip()
-    except Exception as error:
-        logger.warning("Tesseract OCR failed: %s", error)
-        return ""
 
 def _pdf_to_images(pdf_path: str) -> List:
     if not PDF2IMAGE_AVAILABLE: raise ExtractionError("PDF rendering is unavailable because pdf2image is not installed.")
@@ -100,7 +92,12 @@ def _extract_json_value(raw: str):
     cleaned = _clean_json(raw)
     decoder = json.JSONDecoder()
     try:
-        return decoder.decode(cleaned)[0]
+        # decode() returns the value itself. raw_decode() returns a
+        # (value, end_index) tuple, which is why the fallback below subscripts
+        # and this does not -- subscripting here unwrapped a one-page list into
+        # a bare page dict, raised KeyError on an object, and sliced the first
+        # character off a string.
+        return decoder.decode(cleaned)
     except json.JSONDecodeError:
         pass
 
@@ -112,6 +109,11 @@ def _extract_json_value(raw: str):
         except json.JSONDecodeError:
             continue
     raise ExtractionError("Gemini returned malformed extraction data.")
+
+def _preview(raw: str, limit: int = 400) -> str:
+    """Condense a model reply to one loggable line."""
+    text = " ".join(str(raw).split())
+    return text[:limit] + ("..." if len(text) > limit else "")
 
 def _safe_float(val) -> Optional[float]:
     try: return None if val is None else float(val)
@@ -137,14 +139,26 @@ class GeminiCaller:
     def token_usage(self) -> TokenUsage: return TokenUsage(total_tokens=self._input_tokens + self._output_tokens, input_tokens=self._input_tokens, output_tokens=self._output_tokens)
     @staticmethod
     def _permanent_model_error(error): return any(mark in str(error).lower() for mark in ("404", "not found", "not supported"))
+    # Transient server-side conditions. Gemini reports capacity pressure as
+    # "503 UNAVAILABLE ... currently experiencing high demand", which matched
+    # none of the old marks ("temporarily unavailable" never appears in the
+    # message), so the most retryable error there is went straight to the
+    # give-up branch and MAX_RETRIES never fired.
+    RETRYABLE_MARKS = (
+        "429", "resource_exhausted", "rate limit",
+        "500", "502", "503", "504",
+        "unavailable", "overloaded", "high demand",
+        "internal error", "deadline_exceeded", "try again",
+    )
+
     @staticmethod
-    def _retryable_error(error): return any(mark in str(error).lower() for mark in ("429", "resource_exhausted", "rate limit", "temporarily unavailable"))
+    def _retryable_error(error): return any(mark in str(error).lower() for mark in GeminiCaller.RETRYABLE_MARKS)
     def call(self, page_images: List[bytes], ocr_hints: List[str], page_numbers: List[int]) -> List[str]:
         if USE_MOCK_MODE: return [self._mock_response(page_no) for page_no in page_numbers]
         if not self.client: raise ExtractionError("Gemini is not configured. Set GOOGLE_API_KEY.")
         contents = []
         for image_bytes, ocr_text, page_number in zip(page_images, ocr_hints, page_numbers):
-            contents.extend([types.Part.from_text(text=f"PAGE {page_number}. OCR hint: {ocr_text[:1500] or '(unavailable)'}"), types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")])
+            contents.extend([types.Part.from_text(text=f"PAGE {page_number}. OCR hint:\n{ocr_text or '(unavailable)'}"), types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")])
         config = types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, response_mime_type="application/json", temperature=0.1, max_output_tokens=8192)
         last_error = None
         for model_name in self.model_queue:
@@ -161,16 +175,57 @@ class GeminiCaller:
                         logger.warning("Gemini model %s is unavailable; trying the next configured model", model_name); break
                     if not self._retryable_error(error) or attempt == MAX_RETRIES:
                         logger.warning("Gemini model %s failed: %s", model_name, error); break
-                    wait = min(2 ** attempt, 4)
-                    logger.warning("Gemini model %s rate limited; retrying in %s seconds", model_name, wait); time.sleep(wait)
+                    wait = min(2 ** (attempt + 1), 8)
+                    logger.warning("Gemini model %s returned a transient error; retry %s/%s in %ss", model_name, attempt + 1, MAX_RETRIES, wait); time.sleep(wait)
         logger.error("All configured Gemini models failed: %s", last_error)
         raise ExtractionError(_error_message(last_error or Exception("No configured Gemini model")))
+    # Keys a model plausibly wraps the page array in when it ignores the
+    # "return a JSON ARRAY" instruction and returns an object instead.
+    ENVELOPE_KEYS = ("pagewise_line_items", "pages", "results", "data", "page_results")
+
     @staticmethod
     def _split_batch_response(raw: str, expected: int) -> List[str]:
+        """
+        Normalise Gemini's reply into exactly `expected` page objects.
+
+        A page count that disagrees with the batch used to fail the whole
+        document, so one confused page cost every other page in the bill. A
+        mismatch is now reconciled and logged: surplus pages are dropped,
+        missing ones are filled with empty pages, and the pages that did come
+        back survive.
+        """
         parsed = _extract_json_value(raw)
-        if isinstance(parsed, list) and len(parsed) == expected and all(isinstance(item, dict) for item in parsed): return [json.dumps(item) for item in parsed]
-        if expected == 1 and isinstance(parsed, dict): return [json.dumps(parsed)]
-        raise ExtractionError("Gemini returned an unexpected number of page results.")
+
+        if isinstance(parsed, dict):
+            for key in GeminiCaller.ENVELOPE_KEYS:
+                if isinstance(parsed.get(key), list):
+                    parsed = parsed[key]
+                    break
+
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+
+        if not isinstance(parsed, list):
+            logger.warning("Gemini returned %s, not a page list: %s", type(parsed).__name__, _preview(raw))
+            raise ExtractionError("Gemini returned malformed extraction data.")
+
+        pages = [item for item in parsed if isinstance(item, dict)]
+        if not pages:
+            logger.warning("Gemini returned no page objects: %s", _preview(raw))
+            raise ExtractionError("Gemini returned malformed extraction data.")
+
+        if len(pages) != expected:
+            logger.warning(
+                "Gemini returned %d page object(s) for a %d-page batch; reconciling. Raw: %s",
+                len(pages), expected, _preview(raw),
+            )
+            pages = pages[:expected]
+            pages.extend(
+                {"page_no": str(index + 1), "page_type": "Bill Detail", "bill_items": []}
+                for index in range(len(pages), expected)
+            )
+
+        return [json.dumps(page) for page in pages]
     @staticmethod
     def _mock_response(page_no: int) -> str:
         return json.dumps({"page_no": str(page_no), "page_type": "Bill Detail", "bill_items": [{"item_name": f"Mock Item {page_no}", "item_amount": 100.0 * page_no, "item_rate": 100.0, "item_quantity": 1}], "fraud_flags": []})
@@ -190,7 +245,8 @@ class BillExtractor:
             try: pil_images = [Image.open(file_path).convert("RGB")]
             except Exception as error: raise ExtractionError("The uploaded image could not be opened.") from error
         if not pil_images: raise ExtractionError("The document contains no renderable pages.")
-        page_images, page_ocr = [_encode_image(image) for image in pil_images], [_ocr_page(image) for image in pil_images]
+        pil_images = [autorotate_page(image)[0] for image in pil_images]
+        page_images, page_ocr = [_encode_image(image) for image in pil_images], [ocr_page(image) for image in pil_images]
         all_page_results, all_fraud_flags = [], []
         for batch_start in range(0, len(page_images), BATCH_SIZE):
             batch_images, batch_ocr = page_images[batch_start:batch_start+BATCH_SIZE], page_ocr[batch_start:batch_start+BATCH_SIZE]

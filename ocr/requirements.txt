@@ -12,7 +12,15 @@ pypdf>=4.3.1
 
 Pillow>=10.4.0
 
+# OCR engines. Tesseract is the fallback and the source of the calibrated
+# page-quality signal; PP-OCR (PP-OCRv6 weights executed on onnxruntime) is the
+# primary engine. rapidocr ships the .onnx weights inside the wheel (~31 MB),
+# so there is no model download at build time or on first request.
 pytesseract>=0.3.13
+
+rapidocr>=3.9,<4
+
+onnxruntime>=1.18,<2
 
 google-genai>=1.0.0
 

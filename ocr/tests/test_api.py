@@ -205,3 +205,138 @@ class TestSchemas:
         resp = ExtractionResponse(is_success=False, error="Something went wrong")
         assert resp.is_success is False
         assert resp.data is None
+
+
+class TestRetryClassification:
+    """
+    Transient vs permanent error classification.
+
+    The 503 case is regression cover: Gemini reports capacity pressure with a
+    message that contains neither "rate limit" nor "temporarily unavailable",
+    so an earlier version treated it as permanent and never retried.
+    """
+
+    GEMINI_503 = (
+        "503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is "
+        "currently experiencing high demand. Spikes in demand are usually "
+        "temporary. Please try again later.', 'status': 'UNAVAILABLE'}}"
+    )
+    GEMINI_404 = (
+        "404 NOT_FOUND. {'error': {'code': 404, 'message': 'This model "
+        "models/gemini-2.5-flash is no longer available to new users.', "
+        "'status': 'NOT_FOUND'}}"
+    )
+    GEMINI_429 = "429 RESOURCE_EXHAUSTED. {'error': {'code': 429}}"
+
+    def test_503_high_demand_is_retryable(self):
+        from app.extractor import GeminiCaller
+        assert GeminiCaller._retryable_error(Exception(self.GEMINI_503))
+
+    def test_503_is_not_treated_as_a_permanent_model_error(self):
+        from app.extractor import GeminiCaller
+        assert not GeminiCaller._permanent_model_error(Exception(self.GEMINI_503))
+
+    def test_429_is_retryable(self):
+        from app.extractor import GeminiCaller
+        assert GeminiCaller._retryable_error(Exception(self.GEMINI_429))
+
+    def test_404_retired_model_is_permanent_not_retryable(self):
+        from app.extractor import GeminiCaller
+        assert GeminiCaller._permanent_model_error(Exception(self.GEMINI_404))
+
+    def test_auth_failure_is_not_retryable(self):
+        from app.extractor import GeminiCaller
+        assert not GeminiCaller._retryable_error(Exception("403 PERMISSION_DENIED: bad api key"))
+
+    def test_404_message_tells_the_operator_the_model_is_wrong(self):
+        from app.extractor import _error_message
+        assert "model is unavailable" in _error_message(Exception(self.GEMINI_404))
+
+
+class TestJsonDecoding:
+    """
+    Regression cover for decode() vs raw_decode().
+
+    decode() returns the value; raw_decode() returns (value, end_index). The
+    original code subscripted both, so clean JSON took the buggy path while
+    the existing preamble test took the correct one and hid it.
+    """
+
+    def test_clean_array_returns_the_whole_list(self):
+        assert _extract_json_value('[{"page_no": "1"}, {"page_no": "2"}]') == [
+            {"page_no": "1"}, {"page_no": "2"},
+        ]
+
+    def test_clean_single_page_array_is_not_unwrapped(self):
+        assert _extract_json_value('[{"page_no": "1"}]') == [{"page_no": "1"}]
+
+    def test_clean_object_does_not_raise_keyerror(self):
+        assert _extract_json_value('{"page_no": "1"}') == {"page_no": "1"}
+
+    def test_bare_string_is_not_sliced(self):
+        assert _extract_json_value('"no items found"') == "no items found"
+
+    def test_preamble_still_works(self):
+        assert _extract_json_value('Here is the JSON:\n[{"page_no": "1"}]') == [{"page_no": "1"}]
+
+    def test_fenced_json_still_works(self):
+        assert _extract_json_value('```json\n[{"page_no": "1"}]\n```') == [{"page_no": "1"}]
+
+
+class TestBatchReconciliation:
+    """A page-count mismatch must not discard the pages that did come back."""
+
+    @staticmethod
+    def _pages(*numbers):
+        return json.dumps([
+            {"page_no": str(n), "page_type": "Bill Detail",
+             "bill_items": [{"item_name": f"Item {n}", "item_amount": 10.0 * n}]}
+            for n in numbers
+        ])
+
+    def test_exact_match(self):
+        from app.extractor import GeminiCaller
+        out = GeminiCaller._split_batch_response(self._pages(1, 2, 3), 3)
+        assert len(out) == 3
+        assert json.loads(out[0])["page_no"] == "1"
+
+    def test_single_page_object_not_wrapped_in_a_list(self):
+        from app.extractor import GeminiCaller
+        out = GeminiCaller._split_batch_response(
+            json.dumps({"page_no": "1", "bill_items": []}), 1)
+        assert len(out) == 1
+
+    def test_too_few_pages_pads_and_keeps_real_ones(self):
+        from app.extractor import GeminiCaller
+        out = GeminiCaller._split_batch_response(self._pages(1, 2), 3)
+        assert len(out) == 3
+        assert json.loads(out[0])["bill_items"]          # real page survived
+        assert json.loads(out[2])["bill_items"] == []    # filler is empty
+
+    def test_too_many_pages_truncates(self):
+        from app.extractor import GeminiCaller
+        out = GeminiCaller._split_batch_response(self._pages(1, 2, 3, 4, 5), 3)
+        assert len(out) == 3
+
+    def test_envelope_object_is_unwrapped(self):
+        from app.extractor import GeminiCaller
+        body = json.dumps({"pagewise_line_items": json.loads(self._pages(1, 2))})
+        out = GeminiCaller._split_batch_response(body, 2)
+        assert len(out) == 2
+        assert json.loads(out[1])["page_no"] == "2"
+
+    def test_non_dict_entries_are_filtered(self):
+        from app.extractor import GeminiCaller
+        body = json.dumps([{"page_no": "1", "bill_items": []}, "junk", 42])
+        out = GeminiCaller._split_batch_response(body, 1)
+        assert len(out) == 1
+
+    def test_scalar_reply_still_raises(self):
+        from app.extractor import GeminiCaller
+        with pytest.raises(ExtractionError, match="malformed"):
+            GeminiCaller._split_batch_response('"nothing to extract"', 2)
+
+    def test_empty_list_still_raises(self):
+        from app.extractor import GeminiCaller
+        with pytest.raises(ExtractionError, match="malformed"):
+            GeminiCaller._split_batch_response("[]", 2)

@@ -1,3 +1,13 @@
+# NOTE ON MEMORY
+# PP-OCR peaks at roughly 750 MB resident per worker while running detection on
+# a 200-DPI page (measured: 168 MB after model load, 609 MB during the first
+# page, 757 MB steady). Capping OMP threads and disabling the onnxruntime arena
+# did not reduce it. A 512 MB instance will be OOM-killed mid-request.
+#
+# On a 512 MB instance, set OCR_ENGINE=tesseract below: the service keeps
+# working, it simply loses PP-OCR's advantage on photographed and handwritten
+# bills. Lowering PDF_DPI to 150 also cuts the peak. Otherwise size the
+# instance at 1 GB or more before enabling ppocr.
 services:
   - type: web
     name: medidata-ocr
@@ -10,7 +20,13 @@ services:
       - key: GEMINI_MODEL
         value: gemini-2.5-flash
       - key: USE_MOCK_MODE
-        value: false
+        value: "false"
       - key: PORT
-        value: 8000
-
+        value: "8000"
+      # Switch to "ppocr" once the instance has >= 1 GB of memory.
+      - key: OCR_ENGINE
+        value: tesseract
+      - key: OCR_MAX_CHARS
+        value: "6000"
+      - key: OCR_AUTOROTATE
+        value: "true"
