@@ -340,3 +340,137 @@ class TestBatchReconciliation:
         from app.extractor import GeminiCaller
         with pytest.raises(ExtractionError, match="malformed"):
             GeminiCaller._split_batch_response("[]", 2)
+
+
+class TestModelFallbackAndRetries:
+    """Tests for multi-model queue fallback, bounded retry backoff, and fail-fast."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_mock_mode(self, monkeypatch):
+        import app.extractor
+        monkeypatch.setattr(app.extractor, "USE_MOCK_MODE", False)
+
+    class MockModelResponse:
+
+        def __init__(self, text):
+            self.text = text
+            self.usage_metadata = type("Usage", (), {
+                "prompt_token_count": 100,
+                "candidates_token_count": 50,
+            })()
+
+    def test_queue_deduplication(self):
+        from app.extractor import GeminiCaller
+        caller = GeminiCaller(models=["model-a", "model-b", "model-a", "model-c", ""])
+        assert caller.model_queue == ["model-a", "model-b", "model-c"]
+
+    def test_transient_503_retries_and_falls_back_to_next_model(self):
+        from app.extractor import GeminiCaller
+        caller = GeminiCaller(
+            models=["primary-model", "fallback-model"],
+            max_retries=2,
+            retry_base_delay=0.01,
+        )
+
+        calls = []
+
+        def mock_generate_content(model, contents, config):
+            calls.append(model)
+            if model == "primary-model":
+                raise Exception("503 UNAVAILABLE. Currently experiencing high demand.")
+            return self.MockModelResponse(json.dumps([{"page_no": "1", "bill_items": []}]))
+
+        mock_client = type("MockClient", (), {
+            "models": type("MockModels", (), {"generate_content": staticmethod(mock_generate_content)})()
+        })()
+        caller.client = mock_client
+
+        out = caller.call([b"fake_image"], ["hint"], [1])
+        assert len(out) == 1
+        assert json.loads(out[0])["page_no"] == "1"
+
+        # primary-model attempted 1 initial + 2 retries = 3 times
+        assert calls.count("primary-model") == 3
+        # fallback-model called once and succeeded
+        assert calls.count("fallback-model") == 1
+        assert calls[-1] == "fallback-model"
+        assert caller.token_usage.total_tokens == 150
+
+    def test_permanent_404_skips_retries_and_falls_back_immediately(self):
+        from app.extractor import GeminiCaller
+        caller = GeminiCaller(
+            models=["retired-model", "working-model"],
+            max_retries=3,
+            retry_base_delay=0.01,
+        )
+
+        calls = []
+
+        def mock_generate_content(model, contents, config):
+            calls.append(model)
+            if model == "retired-model":
+                raise Exception("404 NOT_FOUND. Model models/retired-model is not found.")
+            return self.MockModelResponse(json.dumps([{"page_no": "1", "bill_items": []}]))
+
+        mock_client = type("MockClient", (), {
+            "models": type("MockModels", (), {"generate_content": staticmethod(mock_generate_content)})()
+        })()
+        caller.client = mock_client
+
+        out = caller.call([b"fake_image"], ["hint"], [1])
+        assert len(out) == 1
+
+        # retired-model attempted exactly 1 time (0 retries wasted)
+        assert calls.count("retired-model") == 1
+        assert calls.count("working-model") == 1
+
+    def test_auth_error_fails_fast_without_trying_other_models(self):
+        from app.extractor import GeminiCaller, ExtractionError
+        caller = GeminiCaller(
+            models=["model-1", "model-2"],
+            max_retries=2,
+            retry_base_delay=0.01,
+        )
+
+        calls = []
+
+        def mock_generate_content(model, contents, config):
+            calls.append(model)
+            raise Exception("403 PERMISSION_DENIED. The caller does not have permission")
+
+        mock_client = type("MockClient", (), {
+            "models": type("MockModels", (), {"generate_content": staticmethod(mock_generate_content)})()
+        })()
+        caller.client = mock_client
+
+        with pytest.raises(ExtractionError, match="authentication is unavailable"):
+            caller.call([b"fake_image"], ["hint"], [1])
+
+        # Failed on model-1 immediately; did not waste calls on model-2
+        assert calls == ["model-1"]
+
+    def test_all_models_fail_raises_extraction_error(self):
+        from app.extractor import GeminiCaller, ExtractionError
+        caller = GeminiCaller(
+            models=["model-1", "model-2"],
+            max_retries=1,
+            retry_base_delay=0.01,
+        )
+
+        calls = []
+
+        def mock_generate_content(model, contents, config):
+            calls.append(model)
+            raise Exception("503 UNAVAILABLE. High demand")
+
+        mock_client = type("MockClient", (), {
+            "models": type("MockModels", (), {"generate_content": staticmethod(mock_generate_content)})()
+        })()
+        caller.client = mock_client
+
+        with pytest.raises(ExtractionError, match="high demand"):
+            caller.call([b"fake_image"], ["hint"], [1])
+
+        # Each model attempted 2 times (1 + 1 retry) = 4 calls total
+        assert calls == ["model-1", "model-1", "model-2", "model-2"]
+

@@ -33,13 +33,30 @@ except ImportError as error:
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-FALLBACK_MODELS = [model.strip() for model in os.getenv("GEMINI_MODEL_FALLBACKS", "").split(",") if model.strip()]
-MAX_RETRIES = max(0, min(int(os.getenv("MAX_RETRIES", "2")), 3))
+
+# Fallback models: check GEMINI_FALLBACK_MODELS first, then GEMINI_MODEL_FALLBACKS
+DEFAULT_FALLBACK_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash-lite"]
+raw_fallbacks = os.getenv("GEMINI_FALLBACK_MODELS")
+if raw_fallbacks is None:
+    raw_fallbacks = os.getenv("GEMINI_MODEL_FALLBACKS")
+
+if raw_fallbacks is not None:
+    FALLBACK_MODELS = [model.strip() for model in raw_fallbacks.split(",") if model.strip()]
+else:
+    FALLBACK_MODELS = DEFAULT_FALLBACK_MODELS
+
+# Configurable retries: support GEMINI_MAX_RETRIES, falling back to MAX_RETRIES (default: 2)
+MAX_RETRIES = max(0, min(int(os.getenv("GEMINI_MAX_RETRIES") or os.getenv("MAX_RETRIES", "2")), 5))
+# Configurable retry base delay in seconds (default: 1.0)
+RETRY_BASE_DELAY = max(0.2, min(float(os.getenv("GEMINI_RETRY_BASE_DELAY") or os.getenv("RETRY_BASE_DELAY", "1.0")), 5.0))
+
 BATCH_SIZE = max(1, int(os.getenv("BATCH_SIZE", "3")))
 PDF_DPI = max(72, int(os.getenv("PDF_DPI", "200")))
 POPPLER_PATH = os.getenv("POPPLER_PATH") or None
 USE_MOCK_MODE = os.getenv("USE_MOCK_MODE", "false").lower() == "true"
 logger.info("Gemini API key: %s", "loaded" if GOOGLE_API_KEY else "not loaded")
+logger.info("Configured Gemini models: primary=%s, fallbacks=%s", GEMINI_MODEL, FALLBACK_MODELS)
+logger.info("Retry settings: max_retries=%d, retry_base_delay=%.1fs", MAX_RETRIES, RETRY_BASE_DELAY)
 logger.info("OCR engine: %s (hint capped at %d characters)", OCR_ENGINE, OCR_MAX_CHARS)
 logger.info("interpreter: %s", sys.executable)
 logger.info(
@@ -57,11 +74,14 @@ def _error_message(error: Exception) -> str:
     detail = str(error).lower()
     if any(mark in detail for mark in ("429", "resource_exhausted", "quota", "credits")):
         return "Gemini quota or credits are currently unavailable. Please try again later."
-    if any(mark in detail for mark in ("404", "not found", "not supported")):
+    if any(mark in detail for mark in ("404", "not found", "not supported", "invalid model", "model not found")):
         return "The configured Gemini model is unavailable. Contact the service administrator."
-    if any(mark in detail for mark in ("api key", "authentication", "permission", "403")):
+    if any(mark in detail for mark in ("api key", "authentication", "permission", "403", "401", "unauthenticated")):
         return "Gemini authentication is unavailable. Contact the service administrator."
+    if any(mark in detail for mark in ("503", "unavailable", "high demand", "overloaded")):
+        return "Gemini service is currently experiencing high demand. Please try again in a few moments."
     return "Gemini extraction is currently unavailable. Please try again later."
+
 
 def _encode_image(img) -> bytes:
     buffer = io.BytesIO()
@@ -131,14 +151,49 @@ def _parse_page_result(raw_json: str, page_no: int) -> Tuple[PageLineItems, list
     return PageLineItems(page_no=str(data.get("page_no", page_no)), page_type=str(data.get("page_type", "Bill Detail")), bill_items=items), data.get("fraud_flags", [])
 
 class GeminiCaller:
-    def __init__(self):
+    def __init__(
+        self,
+        models: Optional[List[str]] = None,
+        max_retries: Optional[int] = None,
+        retry_base_delay: Optional[float] = None,
+    ):
         self.client = genai.Client(api_key=GOOGLE_API_KEY) if GEMINI_AVAILABLE and GOOGLE_API_KEY else None
-        self.model_queue = [GEMINI_MODEL, *FALLBACK_MODELS]
+        
+        # Build deduplicated model queue starting with primary model
+        if models is not None:
+            raw_queue = models
+        else:
+            raw_queue = [GEMINI_MODEL, *FALLBACK_MODELS]
+
+        self.model_queue: List[str] = []
+        for m in raw_queue:
+            if m and m not in self.model_queue:
+                self.model_queue.append(m)
+        if not self.model_queue:
+            self.model_queue = [GEMINI_MODEL]
+
+        self.max_retries = max_retries if max_retries is not None else MAX_RETRIES
+        self.retry_base_delay = retry_base_delay if retry_base_delay is not None else RETRY_BASE_DELAY
         self._input_tokens = self._output_tokens = 0
+
     @property
-    def token_usage(self) -> TokenUsage: return TokenUsage(total_tokens=self._input_tokens + self._output_tokens, input_tokens=self._input_tokens, output_tokens=self._output_tokens)
+    def token_usage(self) -> TokenUsage:
+        return TokenUsage(
+            total_tokens=self._input_tokens + self._output_tokens,
+            input_tokens=self._input_tokens,
+            output_tokens=self._output_tokens,
+        )
+
     @staticmethod
-    def _permanent_model_error(error): return any(mark in str(error).lower() for mark in ("404", "not found", "not supported"))
+    def _permanent_model_error(error) -> bool:
+        err_str = str(error).lower()
+        return any(mark in err_str for mark in ("404", "not found", "not supported", "invalid model", "model not found"))
+
+    @staticmethod
+    def _auth_error(error) -> bool:
+        err_str = str(error).lower()
+        return any(mark in err_str for mark in ("401", "403", "permission_denied", "api_key_invalid", "unauthenticated", "invalid api key"))
+
     # Transient server-side conditions. Gemini reports capacity pressure as
     # "503 UNAVAILABLE ... currently experiencing high demand", which matched
     # none of the old marks ("temporarily unavailable" never appears in the
@@ -152,33 +207,94 @@ class GeminiCaller:
     )
 
     @staticmethod
-    def _retryable_error(error): return any(mark in str(error).lower() for mark in GeminiCaller.RETRYABLE_MARKS)
+    def _retryable_error(error) -> bool:
+        return any(mark in str(error).lower() for mark in GeminiCaller.RETRYABLE_MARKS)
+
     def call(self, page_images: List[bytes], ocr_hints: List[str], page_numbers: List[int]) -> List[str]:
-        if USE_MOCK_MODE: return [self._mock_response(page_no) for page_no in page_numbers]
-        if not self.client: raise ExtractionError("Gemini is not configured. Set GOOGLE_API_KEY.")
+        if USE_MOCK_MODE:
+            return [self._mock_response(page_no) for page_no in page_numbers]
+        if not self.client:
+            raise ExtractionError("Gemini is not configured. Set GOOGLE_API_KEY.")
         contents = []
         for image_bytes, ocr_text, page_number in zip(page_images, ocr_hints, page_numbers):
-            contents.extend([types.Part.from_text(text=f"PAGE {page_number}. OCR hint:\n{ocr_text or '(unavailable)'}"), types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")])
-        config = types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT, response_mime_type="application/json", temperature=0.1, max_output_tokens=8192)
+            contents.extend([
+                types.Part.from_text(text=f"PAGE {page_number}. OCR hint:\n{ocr_text or '(unavailable)'}"),
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+            ])
+        config = types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            temperature=0.1,
+            max_output_tokens=8192,
+        )
         last_error = None
-        for model_name in self.model_queue:
-            for attempt in range(MAX_RETRIES + 1):
+        for model_idx, model_name in enumerate(self.model_queue):
+            logger.info("Calling Gemini model: %s (model %d/%d)", model_name, model_idx + 1, len(self.model_queue))
+            for attempt in range(self.max_retries + 1):
                 try:
-                    response = self.client.models.generate_content(model=model_name, contents=contents, config=config)
+                    response = self.client.models.generate_content(
+                        model=model_name,
+                        contents=contents,
+                        config=config,
+                    )
                     usage = getattr(response, "usage_metadata", None)
                     self._input_tokens += getattr(usage, "prompt_token_count", 0) or 0
                     self._output_tokens += getattr(usage, "candidates_token_count", 0) or 0
+
+                    if model_idx > 0:
+                        logger.info("Gemini fallback model %s succeeded", model_name)
+                    else:
+                        logger.info("Gemini model %s succeeded", model_name)
+
                     return self._split_batch_response(response.text or "", len(page_images))
                 except Exception as error:
                     last_error = error
+                    short_err = _preview(str(error), limit=200)
+
+                    # Permanent auth error: fail fast without hammering API across all models
+                    if self._auth_error(error):
+                        logger.error("Gemini authentication failed for model %s: %s", model_name, short_err)
+                        raise ExtractionError(_error_message(error)) from error
+
+                    # Permanent model error (e.g. 404): move immediately to next configured model
                     if self._permanent_model_error(error):
-                        logger.warning("Gemini model %s is unavailable; trying the next configured model", model_name); break
-                    if not self._retryable_error(error) or attempt == MAX_RETRIES:
-                        logger.warning("Gemini model %s failed: %s", model_name, error); break
-                    wait = min(2 ** (attempt + 1), 8)
-                    logger.warning("Gemini model %s returned a transient error; retry %s/%s in %ss", model_name, attempt + 1, MAX_RETRIES, wait); time.sleep(wait)
-        logger.error("All configured Gemini models failed: %s", last_error)
+                        if model_idx + 1 < len(self.model_queue):
+                            logger.warning(
+                                "Gemini model %s is unavailable (%s); trying fallback model %s",
+                                model_name, short_err, self.model_queue[model_idx + 1]
+                            )
+                        else:
+                            logger.warning(
+                                "Gemini model %s is unavailable (%s); no further fallback models configured",
+                                model_name, short_err
+                            )
+                        break
+
+                    # Non-retryable error or retries exhausted for this model: advance to next model
+                    if not self._retryable_error(error) or attempt == self.max_retries:
+                        if model_idx + 1 < len(self.model_queue):
+                            logger.warning(
+                                "Gemini model %s exhausted %d retries or hit non-retryable error (%s); trying fallback model %s",
+                                model_name, attempt, short_err, self.model_queue[model_idx + 1]
+                            )
+                        else:
+                            logger.warning(
+                                "Gemini model %s exhausted %d retries (%s); no further fallback models configured",
+                                model_name, attempt, short_err
+                            )
+                        break
+
+                    # Transient error: backoff and retry this model
+                    wait = min(self.retry_base_delay * (2 ** attempt), 8.0)
+                    logger.warning(
+                        "Gemini model %s returned transient error (%s); retry %d/%d in %.1fs",
+                        model_name, short_err, attempt + 1, self.max_retries, wait
+                    )
+                    time.sleep(wait)
+
+        logger.error("All configured Gemini models failed (%s). Last error: %s", ", ".join(self.model_queue), last_error)
         raise ExtractionError(_error_message(last_error or Exception("No configured Gemini model")))
+
     # Keys a model plausibly wraps the page array in when it ignores the
     # "return a JSON ARRAY" instruction and returns an object instead.
     ENVELOPE_KEYS = ("pagewise_line_items", "pages", "results", "data", "page_results")
