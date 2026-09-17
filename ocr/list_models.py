@@ -30,7 +30,7 @@ except ImportError:
     sys.exit("google-genai is not installed: pip install google-genai")
 
 client = genai.Client(api_key=key)
-print(f"key ...{key[-4:]}  |  SDK google-genai\n")
+print("Gemini API key: loaded  |  SDK google-genai\n")
 
 usable = []
 try:
