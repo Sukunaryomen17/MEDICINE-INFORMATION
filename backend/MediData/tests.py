@@ -92,3 +92,130 @@ class FormsTestCase(TestCase):
         form_invalid = PDFUploadForm({}, {"file": invalid_exe})
         self.assertFalse(form_invalid.is_valid())
 
+
+
+class MedicineMatcherTestCase(TestCase):
+    """
+    Cover for the matching rewrite.
+
+    The old WRatio matcher scored 15.2% exact on 400 perturbed real names and
+    returned a *different molecule* 35.8% of the time -- every wrong answer at
+    85.5, the value WRatio gives a broad class of partial matches, which is why
+    a threshold of 80 admitted them. The rewrite scores 95.5% exact with no
+    different-molecule answers. These tests pin the behaviours that got it
+    there, so a future tweak cannot quietly reintroduce the old failure.
+    """
+
+    # Each of these was an observed wrong answer. The assertion is on the
+    # molecule, not the brand: any product with the right molecule is fine.
+    MOLECULE_CASES = [
+        ("Crocin 500", "paracetamol", "was Azithral 500 (azithromycin)"),
+        ("Pan 40", "pantoprazole", "was Atorva 40 (atorvastatin)"),
+        ("Lasix 40", "furosemide", "was Atorva 40 (atorvastatin)"),
+        ("Clopidogrel 75 mg tab", "clopidogrel", "was Augpen HS suspension"),
+        ("Metformin 500", "metformin", "was Althrocin 500 (azithromycin)"),
+        ("Diclofenac 50", "diclofenac", "was Arbitel-Trio 50"),
+        ("Omeprazole 20", "omeprazole", "was Atorfit CV 20"),
+        ("Ranitidine 150", "ranitidine", "was Afogatran 150"),
+    ]
+
+    def test_matches_resolve_to_the_right_molecule(self):
+        for query, molecule, previously in self.MOLECULE_CASES:
+            with self.subTest(query=query):
+                result = find_medicine_details(query)
+                self.assertIsNotNone(result, f"{query} should match ({previously})")
+                self.assertIn(
+                    molecule, result["composition"].lower(),
+                    f"{query} -> {result['matched_name']} "
+                    f"({result['composition']}); expected {molecule}. {previously}",
+                )
+
+    def test_strength_picks_the_right_pack(self):
+        """Core 'augmentin' matches the injection; 625 must win the Duo tablet."""
+        result = find_medicine_details("Augmentin 625")
+        self.assertEqual(result["matched_name"], "Augmentin 625 Duo Tablet")
+
+    def test_generic_name_resolves_via_composition(self):
+        """Bills often name the molecule, not a brand."""
+        result = find_medicine_details("TAB. PARACETAMOL 500MG")
+        self.assertIsNotNone(result)
+        self.assertIn("paracetamol", result["composition"].lower())
+
+    def test_billing_lines_never_match(self):
+        for line in ("GST 12%", "CGST 6%", "Round Off", "Advance Paid",
+                     "Total Payable", "Discount", "ROOM RENT GENERAL WARD",
+                     "NURSING CHARGES", "OT CHARGES"):
+            with self.subTest(line=line):
+                self.assertIsNone(find_medicine_details(line))
+
+    def test_lab_and_device_lines_never_match(self):
+        """Defence in depth: the classifier should catch these first."""
+        for line in ("X-RAY CHEST PA VIEW", "CBC COMPLETE BLOOD COUNT",
+                     "MRI BRAIN SCAN", "IV SET WITH NEEDLE", "SURGICAL GLOVES"):
+            with self.subTest(line=line):
+                self.assertIsNone(find_medicine_details(line))
+
+    def test_unknown_brand_returns_nothing_rather_than_a_guess(self):
+        self.assertIsNone(find_medicine_details("Zincovit"))
+        self.assertIsNone(find_medicine_details("Nonexistentium 999"))
+
+    def test_bill_formatting_is_normalised(self):
+        """TAB./INJ. prefixes, pack counts and case must not change the answer."""
+        baseline = find_medicine_details("Augmentin 625 Duo Tablet")
+        self.assertIsNotNone(baseline)
+        for variant in ("TAB. AUGMENTIN 625 DUO", "AUGMENTIN 625 DUO 10S",
+                        "augmentin-625 duo tablet", "AuGmEnTiN 625 DuO TaBlEt",
+                        "AUGMENTIN 625 DUO TABLET 1X10"):
+            with self.subTest(variant=variant):
+                self.assertEqual(
+                    find_medicine_details(variant)["matched_name"],
+                    baseline["matched_name"],
+                )
+
+    def test_empty_and_junk_input(self):
+        for value in ("", None, "   ", "%%%", "12345"):
+            with self.subTest(value=value):
+                self.assertIsNone(find_medicine_details(value))
+
+    def test_result_shape_is_unchanged(self):
+        """views.py and the frontend read these keys."""
+        result = find_medicine_details("Pan 40")
+        self.assertEqual(
+            set(result),
+            {"matched_name", "composition", "uses", "side_effects",
+             "manufacturer", "image_url", "match_score"},
+        )
+        self.assertIsInstance(result["match_score"], float)
+
+    def test_search_and_lookup_api_still_work(self):
+        results = search_medicines("augmentin", limit=5)
+        self.assertTrue(results)
+        self.assertTrue(any("Augmentin" in r["name"] for r in results))
+        self.assertIsNotNone(get_medicine_by_name("Augmentin 625 Duo Tablet"))
+
+
+class MatcherNormalisationTestCase(TestCase):
+    """Unit cover for the parsing the matcher is built on."""
+
+    def test_brand_core_drops_form_and_strength(self):
+        from MediData.services.medicine_matcher import split_name
+        self.assertEqual(split_name("TAB. DOLO 650")[0], "dolo")
+        self.assertEqual(split_name("Azithral 500 Tablet")[0], "azithral")
+        self.assertEqual(split_name("INJ. MONOCEF 1GM")[0], "monocef")
+
+    def test_brand_core_keeps_distinguishing_words(self):
+        """SR/CV/Forte are part of the product identity, not packaging."""
+        from MediData.services.medicine_matcher import split_name
+        self.assertEqual(split_name("PROVANOL SR 40 1X10")[0], "provanol sr")
+        self.assertEqual(split_name("Crocin Advance 500mg Tablet")[0], "crocin advance")
+
+    def test_strengths_are_extracted(self):
+        from MediData.services.medicine_matcher import split_name
+        self.assertEqual(split_name("Pan 40 Tablet")[1], frozenset({40.0}))
+        self.assertEqual(split_name("GTN Sorbitrate CR 2.6 Tablet")[1], frozenset({2.6}))
+
+    def test_billing_line_detection(self):
+        from MediData.services.medicine_matcher import looks_like_billing_line, split_name
+        self.assertTrue(looks_like_billing_line(split_name("Total Payable")[0]))
+        self.assertTrue(looks_like_billing_line(split_name("ROOM RENT")[0]))
+        self.assertFalse(looks_like_billing_line(split_name("Crocin 500")[0]))
