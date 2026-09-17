@@ -94,32 +94,66 @@ class TestRebuildRows:
 
 
 class TestEngineDispatch:
-    """ocr_page: PP-OCR primary, Tesseract fallback."""
+    """
+    ocr_page: PP-OCR primary, Tesseract as failure fallback and thin-page
+    second opinion.
+    """
 
     @pytest.fixture(autouse=True)
     def _engine_defaults(self, monkeypatch):
         monkeypatch.setattr(ocr_engines, "USE_OCR_HINT", True)
         monkeypatch.setattr(ocr_engines, "OCR_ENGINE", "ppocr")
         monkeypatch.setattr(ocr_engines, "OCR_MIN_CHARS", 40)
+        monkeypatch.setattr(ocr_engines, "OCR_THIN_CHARS", 800)
         monkeypatch.setattr(ocr_engines, "OCR_MAX_CHARS", 6000)
 
-    def test_ppocr_result_used_when_it_reads_the_page(self, monkeypatch):
-        monkeypatch.setattr(ocr_engines, "ocr_page_ppocr", lambda img: "P" * 100)
+    def test_healthy_ppocr_page_skips_tesseract_entirely(self, monkeypatch):
+        monkeypatch.setattr(ocr_engines, "ocr_page_ppocr", lambda img: "P" * 900)
         monkeypatch.setattr(
             ocr_engines, "ocr_page_tesseract", lambda img: pytest.fail("should not run")
         )
-        assert ocr_engines.ocr_page(object()) == "P" * 100
+        assert ocr_engines.ocr_page(object()) == "P" * 900
 
-    def test_falls_back_when_ppocr_returns_nothing(self, monkeypatch):
+    def test_failed_ppocr_read_uses_tesseract(self, monkeypatch):
         monkeypatch.setattr(ocr_engines, "ocr_page_ppocr", lambda img: "")
         monkeypatch.setattr(ocr_engines, "ocr_page_tesseract", lambda img: "T" * 100)
         assert ocr_engines.ocr_page(object()) == "T" * 100
 
-    def test_falls_back_when_ppocr_yield_is_too_low(self, monkeypatch):
-        """A near-empty read is worse than no hint -- retry with Tesseract."""
+    def test_near_empty_ppocr_read_uses_tesseract(self, monkeypatch):
         monkeypatch.setattr(ocr_engines, "ocr_page_ppocr", lambda img: "abc")
         monkeypatch.setattr(ocr_engines, "ocr_page_tesseract", lambda img: "T" * 100)
         assert ocr_engines.ocr_page(object()) == "T" * 100
+
+    def test_thin_page_keeps_tesseract_when_it_reads_more_numbers(self, monkeypatch):
+        """The real sample_8 shape: PP-OCR under-segments, Tesseract does better."""
+        ppocr = "Consultation charge and bed charge listed 1.00 2.00"
+        tess = "Consultation 1.00 Bed 2.00 Lab 3.00 Pharmacy 4.00 Misc 5.00"
+        # Precondition: thin enough for a second opinion, not a failed read.
+        assert ocr_engines.OCR_MIN_CHARS <= len(ppocr) < ocr_engines.OCR_THIN_CHARS
+        assert ocr_engines.numeric_tokens(tess) > ocr_engines.numeric_tokens(ppocr)
+
+        monkeypatch.setattr(ocr_engines, "ocr_page_ppocr", lambda img: ppocr)
+        monkeypatch.setattr(ocr_engines, "ocr_page_tesseract", lambda img: tess)
+        assert ocr_engines.ocr_page(object()) == tess
+
+    def test_thin_page_keeps_ppocr_when_it_reads_more_numbers(self, monkeypatch):
+        """The real sample_2 shape: Tesseract has more text, PP-OCR more amounts."""
+        ppocr = "Consultation 1.00 Bed 2.00 Lab 3.00 Pharmacy 4.00 Misc 5.00"
+        tess = "a considerably longer transcription carrying far fewer numeric tokens 1.00"
+        assert ocr_engines.OCR_MIN_CHARS <= len(ppocr) < ocr_engines.OCR_THIN_CHARS
+        assert len(tess) > len(ppocr)                                   # more text
+        assert ocr_engines.numeric_tokens(ppocr) > ocr_engines.numeric_tokens(tess)  # fewer numbers
+
+        monkeypatch.setattr(ocr_engines, "ocr_page_ppocr", lambda img: ppocr)
+        monkeypatch.setattr(ocr_engines, "ocr_page_tesseract", lambda img: tess)
+        assert ocr_engines.ocr_page(object()) == ppocr
+
+    def test_thin_page_keeps_ppocr_when_tesseract_is_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            ocr_engines, "ocr_page_ppocr",
+            lambda img: "Consultation 1.00 Bed 2.00 Lab 3.00 Pharmacy 4.00")
+        monkeypatch.setattr(ocr_engines, "ocr_page_tesseract", lambda img: "")
+        assert ocr_engines.ocr_page(object()) == "Consultation 1.00 Bed 2.00 Lab 3.00 Pharmacy 4.00"
 
     def test_tesseract_engine_skips_ppocr_entirely(self, monkeypatch):
         monkeypatch.setattr(ocr_engines, "OCR_ENGINE", "tesseract")
@@ -145,6 +179,104 @@ class TestEngineDispatch:
             ocr_engines, "ocr_page_ppocr", lambda img: pytest.fail("should not run")
         )
         assert ocr_engines.ocr_page(object()) == ""
+
+
+class TestNumericTokens:
+    def test_counts_amounts(self):
+        assert ocr_engines.numeric_tokens("BED CHARGE 1 No 1500.00 1380.00") == 3
+
+    def test_handles_thousands_separators(self):
+        assert ocr_engines.numeric_tokens("TOTAL 71,925.00") == 1
+
+    def test_empty(self):
+        assert ocr_engines.numeric_tokens("") == 0
+        assert ocr_engines.numeric_tokens(None) == 0
+
+
+class TestAutorotateGuards:
+    """
+    Regression cover for a flip that destroyed five pages of a real bill.
+
+    OSD reported 180 on an already-upright hospital bill at confidence 5.86 --
+    higher than several correct readings -- so confidence alone cannot be the
+    guard. 90/270 stay trusted; 180 is opt-in.
+    """
+
+    class StubImage:
+        def __init__(self): self.rotated_by = None
+        def rotate(self, angle, expand=False):
+            self.rotated_by = angle
+            return self
+
+    def _osd(self, monkeypatch, rotate, conf):
+        monkeypatch.setattr(ocr_engines, "OCR_AUTOROTATE", True)
+        monkeypatch.setattr(ocr_engines, "TESSERACT_AVAILABLE", True)
+        monkeypatch.setattr(ocr_engines, "OCR_OSD_MIN_CONFIDENCE", 2.0)
+
+        class FakeTess:
+            class Output:
+                DICT = "dict"
+
+            @staticmethod
+            def image_to_osd(img, output_type=None):
+                return {"rotate": rotate, "orientation_conf": conf}
+
+        monkeypatch.setattr(ocr_engines, "pytesseract", FakeTess)
+
+    def test_270_is_applied(self, monkeypatch):
+        self._osd(monkeypatch, 270, 6.60)
+        img = self.StubImage()
+        out, rot = ocr_engines.autorotate_page(img)
+        assert rot == 270 and img.rotated_by == -270
+
+    def test_90_is_applied(self, monkeypatch):
+        self._osd(monkeypatch, 90, 3.0)
+        img = self.StubImage()
+        _, rot = ocr_engines.autorotate_page(img)
+        assert rot == 90
+
+    def test_180_is_ignored_even_at_high_confidence(self, monkeypatch):
+        self._osd(monkeypatch, 180, 5.86)
+        monkeypatch.setattr(ocr_engines, "OCR_AUTOROTATE_180", False)
+        img = self.StubImage()
+        out, rot = ocr_engines.autorotate_page(img)
+        assert rot == 0 and img.rotated_by is None and out is img
+
+    def test_180_applied_when_explicitly_enabled(self, monkeypatch):
+        self._osd(monkeypatch, 180, 5.86)
+        monkeypatch.setattr(ocr_engines, "OCR_AUTOROTATE_180", True)
+        img = self.StubImage()
+        _, rot = ocr_engines.autorotate_page(img)
+        assert rot == 180
+
+    def test_low_confidence_rotation_is_ignored(self, monkeypatch):
+        self._osd(monkeypatch, 270, 0.5)
+        img = self.StubImage()
+        _, rot = ocr_engines.autorotate_page(img)
+        assert rot == 0 and img.rotated_by is None
+
+    def test_zero_rotation_is_a_no_op(self, monkeypatch):
+        self._osd(monkeypatch, 0, 5.6)
+        img = self.StubImage()
+        out, rot = ocr_engines.autorotate_page(img)
+        assert rot == 0 and out is img
+
+    def test_osd_failure_leaves_page_untouched(self, monkeypatch):
+        monkeypatch.setattr(ocr_engines, "OCR_AUTOROTATE", True)
+        monkeypatch.setattr(ocr_engines, "TESSERACT_AVAILABLE", True)
+
+        class Boom:
+            class Output:
+                DICT = "dict"
+
+            @staticmethod
+            def image_to_osd(img, output_type=None):
+                raise RuntimeError("too few characters for OSD")
+
+        monkeypatch.setattr(ocr_engines, "pytesseract", Boom)
+        img = self.StubImage()
+        out, rot = ocr_engines.autorotate_page(img)
+        assert rot == 0 and out is img
 
 
 class TestPPOCRFailureHandling:

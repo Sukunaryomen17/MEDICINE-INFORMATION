@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -64,10 +65,13 @@ USE_OCR_HINT = os.getenv("USE_OCR_HINT", "true").strip().lower() == "true"
 # worth having.
 OCR_MAX_CHARS = int(os.getenv("OCR_MAX_CHARS", "6000"))
 
-# Tesseract only: mean word confidence below which the hint is discarded.
-# 35 catches pages where OCR has collapsed completely; it is deliberately not
-# a handwriting detector.
+# Tesseract only: the hint is discarded when mean word confidence is below
+# OCR_MIN_CONFIDENCE *and* fewer than OCR_MIN_WORDS words were read. Both
+# conditions are required. Confidence alone was throwing away real pages: a
+# dense 6-page bill scored 33.3 across 955 words -- noisy, but plainly a read
+# page rather than a collapse, and the whole hint was dropped.
 OCR_MIN_CONFIDENCE = float(os.getenv("OCR_MIN_CONFIDENCE", "35"))
+OCR_MIN_WORDS = int(os.getenv("OCR_MIN_WORDS", "40"))
 
 # PP-OCR only: drop individual detections recognised below this score.
 OCR_REC_MIN_SCORE = float(os.getenv("OCR_REC_MIN_SCORE", "0.5"))
@@ -75,6 +79,14 @@ OCR_REC_MIN_SCORE = float(os.getenv("OCR_REC_MIN_SCORE", "0.5"))
 # PP-OCR only: below this many characters the page is treated as a failed read
 # and Tesseract is tried instead.
 OCR_MIN_CHARS = int(os.getenv("OCR_MIN_CHARS", "40"))
+
+# PP-OCR only: a result thinner than this is *suspicious* rather than failed,
+# so Tesseract is run as a second opinion and the richer of the two is kept.
+# PP-OCR's detector occasionally under-segments a page Tesseract reads well
+# (one invoice yielded 32 detections / 478 chars against Tesseract's 904, and
+# raising the detector input size did not recover it). Measured across 50
+# pages of real bills, only 7 fall below this, so the extra pass is rare.
+OCR_THIN_CHARS = int(os.getenv("OCR_THIN_CHARS", "800"))
 
 # Row reconstruction. Two detections share a row when their vertical centres
 # are within OCR_ROW_Y_TOL * (median detection height). Within a row, a
@@ -89,7 +101,25 @@ OCR_ROW_GAP = float(os.getenv("OCR_ROW_GAP", "0.75"))
 # correctly ordered column header row once this was applied.
 OCR_AUTOROTATE = os.getenv("OCR_AUTOROTATE", "true").strip().lower() == "true"
 
+# 180-degree flips are NOT applied by default, and this is not timidity.
+# OSD infers 90/270 from the geometry of text lines, which is reliable; it
+# infers 0-vs-180 from glyph asymmetry, which fails on table-heavy forms with
+# few words. On a 5-page hospital bill OSD reported 180 on every page -- twice
+# at confidence 5.86, higher than several correct readings, so a confidence
+# threshold does not separate them. Applying those flips turned an upright
+# page upside down and took Tesseract from 2563 characters to zero on all five
+# pages. The costs are asymmetric: wrongly flipping a page destroys it, while
+# declining to flip a genuinely inverted one leaves it no worse than before
+# (and PP-OCR's textline orientation classifier still copes). Enable only if
+# your scans are reliably fed upside down.
+OCR_AUTOROTATE_180 = os.getenv("OCR_AUTOROTATE_180", "false").strip().lower() == "true"
+
+# Secondary guard: ignore any OSD call made with less confidence than this.
+OCR_OSD_MIN_CONFIDENCE = float(os.getenv("OCR_OSD_MIN_CONFIDENCE", "2.0"))
+
 COLUMN_GAP = "   "
+
+_NUMERIC = re.compile(r"\d[\d,]*\.?\d*")
 
 
 # ── Optional dependencies ──────────────────────────────────────────────────
@@ -182,9 +212,29 @@ def autorotate_page(img) -> Tuple[Any, int]:
     try:
         osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
         rotation = int(osd.get("rotate", 0)) % 360
-        if rotation:
-            logger.info("rotating page by %d degrees before OCR and extraction", rotation)
-            return img.rotate(-rotation, expand=True), rotation
+        confidence = float(osd.get("orientation_conf", 0) or 0)
+
+        if not rotation:
+            return img, 0
+        if confidence < OCR_OSD_MIN_CONFIDENCE:
+            logger.info(
+                "ignoring %d-degree rotation: OSD confidence %.2f < %.2f",
+                rotation, confidence, OCR_OSD_MIN_CONFIDENCE,
+            )
+            return img, 0
+        if rotation == 180 and not OCR_AUTOROTATE_180:
+            logger.info(
+                "ignoring 180-degree flip (OSD confidence %.2f); OSD cannot tell "
+                "0 from 180 reliably on forms. Set OCR_AUTOROTATE_180=true to apply it.",
+                confidence,
+            )
+            return img, 0
+
+        logger.info(
+            "rotating page by %d degrees (OSD confidence %.2f) before OCR and extraction",
+            rotation, confidence,
+        )
+        return img.rotate(-rotation, expand=True), rotation
     except Exception as error:  # noqa: BLE001
         logger.debug("orientation detection unavailable for this page: %s", error)
     return img, 0
@@ -340,12 +390,11 @@ def ocr_page_tesseract(img) -> str:
             return ""
 
         mean_confidence = sum(confidences) / len(confidences)
-        if mean_confidence < OCR_MIN_CONFIDENCE:
+        if mean_confidence < OCR_MIN_CONFIDENCE and len(confidences) < OCR_MIN_WORDS:
             logger.info(
-                "dropping Tesseract hint: mean confidence %.1f < %.1f "
-                "(OCR collapsed on this page; the model still gets the image)",
-                mean_confidence,
-                OCR_MIN_CONFIDENCE,
+                "dropping Tesseract hint: mean confidence %.1f < %.1f across only "
+                "%d words (OCR collapsed on this page; the model still gets the image)",
+                mean_confidence, OCR_MIN_CONFIDENCE, len(confidences),
             )
             return ""
 
@@ -355,26 +404,54 @@ def ocr_page_tesseract(img) -> str:
         return ""
 
 
+def numeric_tokens(text: str) -> int:
+    """Count number-like tokens. On a bill these are the payload."""
+    return len(_NUMERIC.findall(text or ""))
+
+
 def ocr_page(img) -> str:
     """
     Produce the OCR text hint for one page.
 
-    PP-OCR runs first when enabled. A page it reads poorly -- fewer than
-    OCR_MIN_CHARS of text -- is retried with Tesseract rather than handed to
-    the model as a misleading hint.
+    PP-OCR runs first when enabled. Two things can send the page to Tesseract:
+
+      * a failed read (under OCR_MIN_CHARS) -- Tesseract's result is used
+        outright;
+      * a thin read (under OCR_THIN_CHARS) -- Tesseract runs as a second
+        opinion and whichever transcription carries more numeric tokens wins.
+
+    The tie-break counts numbers rather than characters deliberately. On one
+    bill Tesseract returned more text (2280 vs 2028 characters) while PP-OCR
+    recovered more of the amounts (251 vs 241), and the amounts are what the
+    downstream extraction needs.
     """
     if not USE_OCR_HINT:
         return ""
 
-    if OCR_ENGINE == "ppocr":
-        text = ocr_page_ppocr(img)
-        if len(text) >= OCR_MIN_CHARS:
-            return text[:OCR_MAX_CHARS]
-        if text:
-            logger.info(
-                "PP-OCR yielded only %d characters (< %d); trying Tesseract",
-                len(text),
-                OCR_MIN_CHARS,
-            )
+    if OCR_ENGINE != "ppocr":
+        return ocr_page_tesseract(img)[:OCR_MAX_CHARS]
 
-    return ocr_page_tesseract(img)[:OCR_MAX_CHARS]
+    text = ocr_page_ppocr(img)
+    if len(text) >= OCR_THIN_CHARS:
+        return text[:OCR_MAX_CHARS]
+
+    fallback = ocr_page_tesseract(img)
+
+    if len(text) < OCR_MIN_CHARS:
+        if fallback:
+            logger.info(
+                "PP-OCR yielded only %d characters (< %d); using Tesseract (%d)",
+                len(text), OCR_MIN_CHARS, len(fallback),
+            )
+            return fallback[:OCR_MAX_CHARS]
+        return text[:OCR_MAX_CHARS]
+
+    if fallback and numeric_tokens(fallback) > numeric_tokens(text):
+        logger.info(
+            "thin PP-OCR page (%d chars, %d numbers); Tesseract read more "
+            "numbers (%d) so its transcription is used",
+            len(text), numeric_tokens(text), numeric_tokens(fallback),
+        )
+        return fallback[:OCR_MAX_CHARS]
+
+    return text[:OCR_MAX_CHARS]

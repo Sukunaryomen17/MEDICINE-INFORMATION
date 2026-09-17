@@ -191,6 +191,10 @@ PP-OCR was *faster* than Tesseract on every sample page (5.4s vs 7.1s, 5.7s vs
 | `OCR_MIN_CONFIDENCE` | `35` | Tesseract only: mean word confidence below which the hint is dropped |
 | `OCR_REC_MIN_SCORE` | `0.5` | PP-OCR only: discard detections recognised below this score |
 | `OCR_MIN_CHARS` | `40` | PP-OCR only: below this yield, the page is retried with Tesseract |
+| `OCR_THIN_CHARS` | `800` | PP-OCR only: below this, Tesseract runs as a second opinion; the transcription with more numeric tokens wins |
+| `OCR_MIN_WORDS` | `40` | Tesseract only: a hint is dropped only if confidence is low *and* fewer words than this were read |
+| `OCR_AUTOROTATE_180` | `false` | Apply 180° flips. Off by default — OSD cannot tell 0 from 180 reliably on forms |
+| `OCR_OSD_MIN_CONFIDENCE` | `2.0` | Ignore orientation calls below this confidence |
 | `OCR_ROW_Y_TOL` | `0.6` | Row grouping tolerance, as a multiple of median detection height |
 | `OCR_ROW_GAP` | `0.75` | Horizontal gap rendered as a column break, same units |
 | `OCR_AUTOROTATE` | `true` | Correct 90° page rotation via Tesseract OSD |
